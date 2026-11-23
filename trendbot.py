@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
 TrendBot — personal paper-trading bot
-Exported from your TrendBot Dashboard on 2026-11-21.
+Exported from your TrendBot Dashboard on 2026-11-23.
 
-Shareable self-updating edition, version 1.0.0.
+Shareable self-updating edition, version 1.1.0.
 Each time it starts, this copy checks its update home on GitHub
 (github.com/truckopspro/trendbot) for a newer version and, if one is
 posted, downloads it, verifies it, and restarts on it automatically.
@@ -15,7 +15,7 @@ Strategy (trend following, daily bars):
     of closing prices with the 50-day moving average.
   - Fast above slow  -> trend is up   -> hold a position.
   - Fast below slow  -> trend is down -> stay in cash.
-  - Each position is sized at 20% of the paper portfolio.
+  - Each position is sized at 10% of the paper portfolio.
   - Paper account starts at $10,000.
   - Market discovery: scans DISCOVERY_UNIVERSE (50 liquid stocks/ETFs),
     scores each 0-100 from real data — momentum (today's % change, /30),
@@ -37,9 +37,9 @@ Strategy (trend following, daily bars):
       win rate under 40% raises it 5 points (cap 75), 60% or better
       lowers it 3 (floor 45).
     * Take-profit: every position is sold in full once its gain reaches
-      20% over its buy price.
+      10% over its buy price.
     * Profit protection: once a position is up at least
-      15%, a turn down (fast
+      9%, a turn down (fast
       average at/below the slow one, or price below the slow average)
       sells it at that check instead of riding a deeper reversal.
     * Re-buy rule: after a take-profit or profit-protection sale the
@@ -67,6 +67,14 @@ Strategy (trend following, daily bars):
       stop are flagged in the check notes. This export prints the
       same gap and extended move per stock; neither version ever
       trades outside regular hours.
+    * News guard: if a news-state.json file sits next to this script
+      (written by the hourly news scan, same shape as the
+      dashboard's), a symbol whose entry is negative, high impact
+      and published under 2 hours ago has its automatic buy held
+      for this run — the run prints and logs "held for news:
+      <headline>". A missing or unreadable file means no holds.
+      News is a filter only: it never triggers a buy, and it never
+      blocks or triggers a sell.
 
 This copy runs in PAPER mode: it prints the trades it *would* make and
 tracks a pretend account in trendbot_paper.json next to this file.
@@ -86,31 +94,33 @@ Going live (your decision, not included):
 import json
 import os
 import sys
-from datetime import date
+from datetime import date, datetime, timezone
 
 try:
     import yfinance as yf
 except ImportError:
-    yf = None
+    sys.exit("Missing dependency: run  pip install yfinance  first.")
 
-WATCHLIST = ["AAPL","MSFT","NVDA","AMZN","GOOGL"]
+WATCHLIST = ["AAPL","MSFT","NVDA","AMZN","GOOGL","TSLA"]
 DISCOVERY_UNIVERSE = ["SPY","QQQ","AAPL","MSFT","NVDA","AMZN","GOOGL","META","TSLA","AMD","NFLX","AVGO","JPM","BAC","WFC","XOM","CVX","UNH","HD","COST","WMT","CRM","PLTR","COIN","HOOD","UBER","SHOP","ABNB","SMCI","ARM","MSTR","LLY","BRK.B","V","MA","PG","JNJ","ORCL","ADBE","NOW","INTU","QCOM","TXN","AMAT","MU","CAT","DE","GS","MS","BLK"]
 DISCOVERY_THRESHOLD = 55
 DISCOVERY_ENABLED = True
 FAST_WINDOW = 20
 SLOW_WINDOW = 50
-POSITION_PCT = 20
+POSITION_PCT = 10
 STARTING_CASH = 10000
 STOP_LOSS_PCT = 7
-TAKE_PROFIT_PCT = 20
-PROFIT_PROTECT_PCT = 15
+TAKE_PROFIT_PCT = 10
+PROFIT_PROTECT_PCT = 9
 BRAKE_PCT = 10
 CRYPTO_UNIVERSE = ["BTC-USD","ETH-USD","SOL","XRP","ADA","DOGE"]
 CRYPTO_STARTING_CASH = 2500
 EARNINGS_DODGE_DAYS = 2
 STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "trendbot_paper.json")
+NEWS_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "news-state.json")
+NEWS_HOLD_HOURS = 2
 LIVE_TRADING = False  # <-- stays False in this export
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 UPDATE_BASE = "https://raw.githubusercontent.com/truckopspro/trendbot/main"
 
 
@@ -160,6 +170,7 @@ def next_earnings_date(symbol):
         return None
 
 
+
 def earnings_block_date(symbol):
     """Earnings date if it falls within EARNINGS_DODGE_DAYS days, else None."""
     d = next_earnings_date(symbol)
@@ -167,6 +178,33 @@ def earnings_block_date(symbol):
         return None
     delta = (date.fromisoformat(d) - date.today()).days
     return d if 0 <= delta <= EARNINGS_DODGE_DAYS else None
+
+
+def news_hold_headline(symbol):
+    """Headline when fresh high-impact negative news holds an
+    automatic buy of the symbol this run, else None. Reads the optional
+    news-state.json placed next to this script (same shape the
+    dashboard stores); a missing or unreadable file means no holds.
+    News is a filter only — it never triggers a buy and never blocks
+    or triggers a sell."""
+    try:
+        with open(NEWS_STATE_FILE) as f:
+            state = json.load(f)
+        entry = (state.get("symbols") or {}).get(symbol)
+        if not entry:
+            return None
+        if entry.get("mood") != "negative" or entry.get("impact") != "high":
+            return None
+        published = entry.get("publishedAt") or ""
+        pub_dt = datetime.fromisoformat(str(published).replace("Z", "+00:00"))
+        if pub_dt.tzinfo is None:
+            pub_dt = pub_dt.replace(tzinfo=timezone.utc)
+        age_secs = (datetime.now(timezone.utc) - pub_dt).total_seconds()
+        if age_secs < 0 or age_secs >= NEWS_HOLD_HOURS * 3600:
+            return None
+        return entry.get("headline") or ""
+    except Exception:
+        return None
 
 
 def overnight_gap(symbol):
@@ -296,9 +334,9 @@ def check_for_update():
         print(f"Update check skipped: {exc}")
 
 
+
 def main():
-    if yf is None:
-        sys.exit("Missing dependency: run  pip install yfinance  first.")
+    check_for_update()
     state = load_state()
     state.setdefault("closed_trades", [])
     state.setdefault("threshold_adjustment", 0)
@@ -466,6 +504,10 @@ def main():
             if brake_active:
                 print(f"SKIP {symbol}: trend up, but the account brake is on - new buys paused until the account recovers")
                 continue
+            held_headline = news_hold_headline(symbol)
+            if held_headline is not None:
+                print(f"SKIP {symbol}: held for news: {held_headline}")
+                continue
             ed = earnings_block_date(symbol)
             if ed:
                 print(f"Skipped {symbol} — earnings on {ed}")
@@ -491,6 +533,7 @@ def main():
         else:
             state_txt = "holding" if symbol in holdings else "in cash"
             print(f"HOLD {symbol}: {state_txt} @ ${price:.2f} (fast ${fast:.2f} vs slow ${slow:.2f})")
+
 
     # --- Market discovery scan ---
     if DISCOVERY_ENABLED:
@@ -531,6 +574,10 @@ def main():
                     else:
                         print(f"  Skipped {r[1]} — waiting for a fresh uptrend after its profit sale.")
                         continue
+                d_held = news_hold_headline(r[1])
+                if d_held is not None:
+                    print(f"  Skipped {r[1]} — held for news: {d_held}.")
+                    continue
                 ed = earnings_block_date(r[1])
                 if ed:
                     print(f"  Skipped {r[1]} — earnings on {ed}.")
@@ -608,6 +655,10 @@ def main():
                 continue
             print(f"  HOLD {symbol}: @ {price:.2f} ({gain:+.1f}% vs buy)")
         elif fast > slow and not btc_down_c and not c_brake:
+            c_held = news_hold_headline(symbol)
+            if c_held is not None:
+                print(f"  SKIP {symbol}: held for news: {c_held}")
+                continue
             budget = min(c_cash, c_total * POSITION_PCT / 100)
             shares = round(budget / price, 4)
             if shares > 0 and shares * price >= 10:
@@ -644,5 +695,4 @@ if LIVE_TRADING:
     raise SystemExit("Live trading is disabled in this export.")
 
 if __name__ == "__main__":
-    check_for_update()
     main()
