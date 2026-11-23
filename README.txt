@@ -39,6 +39,17 @@ headline. News never makes the bot buy anything, and it never
 blocks a sale. No news-state.json file means no holds — the bot
 runs exactly as before.
 
+STEP LADDER (OPTIONAL, OFF BY DEFAULT)
+Version 1.2.0 adds the step ladder. It never opens a position. For
+a position the bot itself opened, it can add planned steps as the
+price dips below the price first paid: step 1 at -3%, step 2 at
+-6.6%, step 3 at -10.92%, each step 1.2x the size of the one
+before, and never more than 2x the position's normal total cost.
+The stop-loss and take-profit then measure from the position's
+average entry, so the stop still protects the whole position.
+To try it, open trendbot.py and change LADDER_ENABLED = False to
+True. Leave it False and the bot runs exactly as before.
+
 YOUR ACCOUNT RECORD
 Your paper account — cash, holdings, and trade history — lives in a
 file called trendbot_paper.json, created next to trendbot.py the

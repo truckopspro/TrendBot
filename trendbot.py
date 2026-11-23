@@ -3,7 +3,7 @@
 TrendBot — personal paper-trading bot
 Exported from your TrendBot Dashboard on 2026-11-23.
 
-Shareable self-updating edition, version 1.1.0.
+Shareable self-updating edition, version 1.2.0.
 Each time it starts, this copy checks its update home on GitHub
 (github.com/truckopspro/trendbot) for a newer version and, if one is
 posted, downloads it, verifies it, and restarts on it automatically.
@@ -75,6 +75,19 @@ Strategy (trend following, daily bars):
       <headline>". A missing or unreadable file means no holds.
       News is a filter only: it never triggers a buy, and it never
       blocks or triggers a sell.
+    * Step ladder (optional, currently OFF): the ladder never
+      opens a position. For a position the bot itself opened, step
+      buys add to it as the price falls below the INITIAL entry —
+      step 1 at -3%, each later step's added deviation
+      multiplied by 1.2, up to 3 steps; each step's
+      size is the first order's value x 1.2^step. Hard cap:
+      total position cost never exceeds 2x the normal position
+      size. The stop-loss and take-profit are measured from the
+      position's AVERAGE entry once steps fill (with no steps they
+      are the entry-based lines, exactly as before). Step buys
+      pause while the account brake is on and are held by the news
+      guard like any buy; exits always run before steps, so a
+      position the stop claims is never stepped into.
 
 This copy runs in PAPER mode: it prints the trades it *would* make and
 tracks a pretend account in trendbot_paper.json next to this file.
@@ -119,8 +132,15 @@ EARNINGS_DODGE_DAYS = 2
 STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "trendbot_paper.json")
 NEWS_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "news-state.json")
 NEWS_HOLD_HOURS = 2
+LADDER_ENABLED = False
+LADDER_MAX_STEPS = 3
+LADDER_FIRST_DEVIATION_PCT = 3
+LADDER_STEP_MULTIPLIER = 1.2
+LADDER_SIZE_MULTIPLIER = 1.2
+LADDER_CAP_MULTIPLE = 2.0
+LADDER_MIN_STEP_VALUE = 25.0
 LIVE_TRADING = False  # <-- stays False in this export
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 UPDATE_BASE = "https://raw.githubusercontent.com/truckopspro/trendbot/main"
 
 
@@ -205,6 +225,81 @@ def news_hold_headline(symbol):
         return entry.get("headline") or ""
     except Exception:
         return None
+
+
+def ladder_step_deviation_pct(step_number):
+    """Cumulative % below the initial entry at which step
+    step_number (1-indexed) triggers."""
+    return LADDER_FIRST_DEVIATION_PCT * sum(
+        LADDER_STEP_MULTIPLIER ** i for i in range(step_number)
+    )
+
+
+def ladder_step_trigger_price(ladder):
+    """Price at which the NEXT step triggers, or None if all used."""
+    nxt = int(ladder["steps_used"]) + 1
+    if nxt > LADDER_MAX_STEPS:
+        return None
+    dev = ladder_step_deviation_pct(nxt)
+    return ladder["initial_entry"] * (1.0 - dev / 100.0)
+
+
+def ladder_step_order_value(ladder, normal_position_value):
+    """Dollar size of the next step, clamped to the 2x cap headroom;
+    0 when the cap leaves no (non-dust) room."""
+    nxt = int(ladder["steps_used"]) + 1
+    raw = ladder["base_order_value"] * LADDER_SIZE_MULTIPLIER ** nxt
+    headroom = LADDER_CAP_MULTIPLE * float(normal_position_value) - float(ladder["total_cost"])
+    value = min(raw, headroom)
+    return value if value >= LADDER_MIN_STEP_VALUE else 0.0
+
+
+def ladder_step_pass(holdings_map, prices_map, sleeve_total, sleeve_cash, brake_on, sleeve_label):
+    """Add due ladder steps to bot-opened positions in one sleeve.
+    Runs after every exit pass, so a position an exit claimed in the
+    same run is never stepped into. Returns the sleeve's new cash.
+    Only holdings carrying a "ladder" record (written when the bot
+    opened the position) can step — manual or older positions have
+    none and are skipped."""
+    if not LADDER_ENABLED:
+        return sleeve_cash
+    normal_value = sleeve_total * POSITION_PCT / 100
+    for symbol in list(holdings_map.keys()):
+        holding = holdings_map[symbol]
+        ladder = holding.get("ladder")
+        if not ladder or symbol not in prices_map:
+            continue
+        price = prices_map[symbol]
+        trigger = ladder_step_trigger_price(ladder)
+        if trigger is None or price > trigger:
+            continue
+        value = ladder_step_order_value(ladder, normal_value)
+        if value <= 0:
+            print(f"  SKIP {symbol}: ladder step due at ${trigger:.2f} but the position is at its 2x cost cap — no step taken ({sleeve_label})")
+            continue
+        if brake_on:
+            print(f"  SKIP {symbol}: ladder step due at ${trigger:.2f} but the account brake is on — step buy paused ({sleeve_label})")
+            continue
+        held_headline = news_hold_headline(symbol)
+        if held_headline is not None:
+            print(f"  SKIP {symbol}: ladder step held for news: {held_headline} ({sleeve_label})")
+            continue
+        value = min(value, sleeve_cash)
+        if value < LADDER_MIN_STEP_VALUE:
+            print(f"  SKIP {symbol}: ladder step due but not enough sleeve cash ({sleeve_label})")
+            continue
+        shares = round(value / price, 4)
+        cost = round(shares * price, 2)
+        total_shares = round(holding["shares"] + shares, 4)
+        total_cost = round(ladder["total_cost"] + cost, 2)
+        new_avg = total_cost / total_shares if total_shares else price
+        holding["shares"] = total_shares
+        holding["avg_cost"] = new_avg
+        ladder["total_cost"] = total_cost
+        ladder["steps_used"] = int(ladder["steps_used"]) + 1
+        sleeve_cash = round(sleeve_cash - cost, 2)
+        print(f"BUY  {symbol}: {shares} shares @ ${price:.2f} = ${cost:,.2f} (Ladder step {ladder['steps_used']} of {LADDER_MAX_STEPS} — average entry now ${new_avg:.2f}; {sleeve_label})")
+    return sleeve_cash
 
 
 def overnight_gap(symbol):
@@ -520,7 +615,7 @@ def main():
             shares = round(budget / price, 4)
             if shares > 0 and shares * price >= 10:
                 cost = round(shares * price, 2)
-                holdings[symbol] = {"shares": shares, "avg_cost": price, "source": "watchlist"}
+                holdings[symbol] = {"shares": shares, "avg_cost": price, "source": "watchlist", "ladder": {"steps_used": 0, "initial_entry": price, "base_order_value": cost, "total_cost": cost}}
                 cash = round(cash - cost, 2)
                 print(f"BUY  {symbol}: {shares} shares @ ${price:.2f} = ${cost:,.2f} (trend up)")
         elif not trend_up and symbol in holdings:
@@ -587,13 +682,23 @@ def main():
                 shares = round(budget / price, 4)
                 if shares > 0 and shares * price >= 10:
                     cost = round(shares * price, 2)
-                    holdings[symbol] = {"shares": shares, "avg_cost": price, "source": "discovery"}
+                    holdings[symbol] = {"shares": shares, "avg_cost": price, "source": "discovery", "ladder": {"steps_used": 0, "initial_entry": price, "base_order_value": cost, "total_cost": cost}}
                     cash = round(cash - cost, 2)
                     print(f"BUY  {symbol}: {shares} shares @ ${price:.2f} = ${cost:,.2f} (discovery pick, score {score:.1f})")
                     bought = True
                 break
             if not bought:
                 print("  No discovery pick qualified today — staying in cash on discovery.")
+
+    # Ladder steps (stocks) — after every exit pass above, so a
+    # position the stop or take-profit claimed this run is never
+    # stepped into.
+    if LADDER_ENABLED:
+        total_now = cash + sum(
+            holdings[s]["shares"] * prices.get(s, holdings[s]["avg_cost"])
+            for s in holdings
+        )
+        cash = ladder_step_pass(holdings, prices, total_now, cash, brake_active, "stock account")
 
     # --- Crypto sleeve (24/7) — separate paper cash, own brake ---
     print("\nCrypto sleeve - trades around the clock, even while stocks are closed:")
@@ -663,13 +768,18 @@ def main():
             shares = round(budget / price, 4)
             if shares > 0 and shares * price >= 10:
                 cost = round(shares * price, 2)
-                c_holdings[symbol] = {"shares": shares, "avg_cost": price, "source": "crypto"}
+                c_holdings[symbol] = {"shares": shares, "avg_cost": price, "source": "crypto", "ladder": {"steps_used": 0, "initial_entry": price, "base_order_value": cost, "total_cost": cost}}
                 c_cash = round(c_cash - cost, 2)
                 print(f"  BUY  {symbol}: {shares} @ {price:.2f} = {cost:.2f} (trend up)")
             else:
                 print(f"  {symbol}: trend up, not enough sleeve cash")
         else:
             print(f"  {symbol}: in cash @ {price:.2f} (fast {fast:.4f} vs slow {slow:.4f})")
+    # Ladder steps (crypto) — after the sleeve's exits and entries,
+    # on the sleeve's own holdings and cash.
+    if LADDER_ENABLED:
+        c_total_now = c_cash + sum(c_holdings[s]["shares"] * c_prices.get(s, c_holdings[s]["avg_cost"]) for s in c_holdings)
+        c_cash = ladder_step_pass(c_holdings, c_prices, c_total_now, c_cash, c_brake, "crypto sleeve")
     sleeve["cash"] = c_cash
     sleeve["holdings"] = c_holdings
 
