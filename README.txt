@@ -60,3 +60,15 @@ over, just delete trendbot_paper.json and run the bot again.
 One honest note: the bot follows trends with real price data, but no
 bot can promise profits. Treat it as a paper experiment and judge it
 by its record over time.
+
+
+PER-COIN CRYPTO (VERSION 1.3.0)
+Version 1.3.0 removes the old Bitcoin market gate from the crypto
+sleeve. Before, no coin could be bought while Bitcoin's trend was
+down, even if that coin's own trend was up. Now each of the six
+coins — Bitcoin, Ethereum, Solana, XRP, Cardano and Dogecoin — is
+bought, held and sold purely on its own trend (its fast average vs
+its slow average). Every other safeguard is unchanged: the 7%
+stop-loss, the 10% take-profit, profit protection, the news hold,
+the sleeve's own account brake (which now also releases on the
+sleeve's own recovery alone), and the optional step ladder.

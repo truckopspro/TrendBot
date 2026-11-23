@@ -3,7 +3,7 @@
 TrendBot — personal paper-trading bot
 Exported from your TrendBot Dashboard on 2026-11-23.
 
-Shareable self-updating edition, version 1.2.0.
+Shareable self-updating edition, version 1.3.0.
 Each time it starts, this copy checks its update home on GitHub
 (github.com/truckopspro/trendbot) for a newer version and, if one is
 posted, downloads it, verifies it, and restarts on it automatically.
@@ -57,7 +57,8 @@ Strategy (trend following, daily bars):
       and DOGE with the same trend, stop-loss, take-profit and
       profit-protection rules. Crypto trades 24/7, so the sleeve is
       checked on every run — including while the stock market is
-      closed. Bitcoin's trend is its market gate.
+      closed. Each coin is judged on its own trend —
+      no coin waits on Bitcoin or any other coin.
     * Overnight / extended hours: the dashboard reads the feed's
       pre-market / after-hours price and computes the overnight gap
       (today's open vs yesterday's close). The gap feeds the daily
@@ -140,7 +141,7 @@ LADDER_SIZE_MULTIPLIER = 1.2
 LADDER_CAP_MULTIPLE = 2.0
 LADDER_MIN_STEP_VALUE = 25.0
 LIVE_TRADING = False  # <-- stays False in this export
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 UPDATE_BASE = "https://raw.githubusercontent.com/truckopspro/trendbot/main"
 
 
@@ -148,6 +149,15 @@ def sma(values, window):
     if len(values) < window:
         return None
     return sum(values[-window:]) / window
+
+
+def crypto_buy_allowed(fast, slow, brake_on):
+    """Per-coin entry rule for the crypto sleeve (v1.3.0): a coin may
+    be bought when its OWN fast average is above its OWN slow average
+    and the sleeve brake is off. No other coin — Bitcoin included —
+    gates the buy. News holds are checked separately by the caller,
+    exactly as before."""
+    return fast is not None and slow is not None and fast > slow and not brake_on
 
 
 def discovery_score(closes_list, volumes, price, change_pct, threshold):
@@ -716,9 +726,6 @@ def main():
             continue
         c_closes[symbol] = list(hist["Close"])
         c_prices[symbol] = float(hist["Close"].iloc[-1])
-    btc_fast = sma(c_closes.get("BTC-USD", []), FAST_WINDOW)
-    btc_slow = sma(c_closes.get("BTC-USD", []), SLOW_WINDOW)
-    btc_down_c = btc_fast is not None and btc_slow is not None and btc_fast < btc_slow
     c_total = c_cash + sum(c_holdings[s]["shares"] * c_prices.get(s, c_holdings[s]["avg_cost"]) for s in c_holdings)
     sleeve["high_water"] = max(sleeve.get("high_water", CRYPTO_STARTING_CASH), c_total)
     c_hw = sleeve["high_water"]
@@ -726,10 +733,13 @@ def main():
     c_brake = sleeve.get("brake_active", False)
     if c_dd >= BRAKE_PCT:
         c_brake = True
-    elif c_brake and not btc_down_c:
+    elif c_brake:
+        # Drawdown has recovered above the brake line (the branch
+        # above handles >= BRAKE_PCT), so the brake releases on the
+        # sleeve's own numbers alone — no market gate (v1.3.0).
         c_brake = False
     sleeve["brake_active"] = c_brake
-    print(f"  Sleeve value {c_total:.2f} (cash {c_cash:.2f}) - brake {'ON' if c_brake else 'off'}, drawdown {c_dd:.1f}% from high-water {c_hw:.2f}; Bitcoin trend {'down - buys blocked' if btc_down_c else 'not down'}")
+    print(f"  Sleeve value {c_total:.2f} (cash {c_cash:.2f}) - brake {'ON' if c_brake else 'off'}, drawdown {c_dd:.1f}% from high-water {c_hw:.2f}; each coin judged on its own trend")
     for symbol in CRYPTO_UNIVERSE:
         if symbol not in c_closes:
             continue
@@ -759,7 +769,7 @@ def main():
                 print(f"  SELL {symbol}: {shares} @ {price:.2f} = {proceeds:.2f} ({exit_reason})")
                 continue
             print(f"  HOLD {symbol}: @ {price:.2f} ({gain:+.1f}% vs buy)")
-        elif fast > slow and not btc_down_c and not c_brake:
+        elif crypto_buy_allowed(fast, slow, c_brake):
             c_held = news_hold_headline(symbol)
             if c_held is not None:
                 print(f"  SKIP {symbol}: held for news: {c_held}")
